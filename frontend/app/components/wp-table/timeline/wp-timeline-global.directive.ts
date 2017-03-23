@@ -28,14 +28,19 @@
 // ++
 import IDirective = angular.IDirective;
 import IComponentOptions = angular.IComponentOptions;
-import {timelineElementCssClass, TimelineViewParameters} from "./wp-timeline";
-import {WorkPackageTimelineCell} from "./wp-timeline-cell";
-import {States} from "../../states.service";
-import {HalRequestService} from "../../api/api-v3/hal-request/hal-request.service";
-import {RelationResource} from "../../api/api-v3/hal-resources/relation-resource.service";
-import {CollectionResource} from "../../api/api-v3/hal-resources/collection-resource.service";
-import {debugLog} from "../../../helpers/debug_output";
-import {WorkPackageResource} from "../../api/api-v3/hal-resources/work-package-resource.service";
+import {timelineElementCssClass, TimelineViewParameters} from './wp-timeline';
+import {WorkPackageTimelineCell} from './wp-timeline-cell';
+import {States} from '../../states.service';
+import {HalRequestService} from '../../api/api-v3/hal-request/hal-request.service';
+import {RelationResource} from '../../api/api-v3/hal-resources/relation-resource.service';
+import {CollectionResource} from '../../api/api-v3/hal-resources/collection-resource.service';
+import {debugLog} from '../../../helpers/debug_output';
+import { WorkPackageResource } from '../../api/api-v3/hal-resources/work-package-resource.service';
+import { WorkPackageStates } from '../../work-package-states.service';
+import { injectorBridge } from '../../angular/angular-injector-bridge.functions';
+import { WorkPackageRelationsService, RelationsStateValue } from "../../wp-relations/wp-relations.service";
+import { Observable } from "rxjs/Rx";
+import { TimelineRelationElement } from "./global-elements/timeline-relation-element";
 import IScope = angular.IScope;
 
 
@@ -63,51 +68,25 @@ function newSegment(vp: TimelineViewParameters,
   return segment;
 }
 
-export class TimelineGlobalElement {
-
-  static readonly timelineGlobalElementIdCssClass = "timeline-global-element-id-";
-
-  private static nextId = 0;
-
-  readonly id = TimelineGlobalElement.nextId++;
-
-  readonly classId = TimelineGlobalElement.timelineGlobalElementIdCssClass + this.id;
-
-  from: string;
-
-  to: string;
-
-}
-
 export class WpTimelineGlobalService {
 
-  private workPackageIdOrder: string[] = [];
+  // Injected arguments
+  public states:States;
+  public wpStates:WorkPackageStates;
+  public wpRelations:WorkPackageRelationsService;
 
-  private viewParameters: TimelineViewParameters;
+  private workPackageIdOrder:string[] = [];
 
-  private cells: {[id: string]: WorkPackageTimelineCell} = {};
+  private viewParameters:TimelineViewParameters;
 
-  private elements: TimelineGlobalElement[] = [];
+  private cells:{[id: string]:WorkPackageTimelineCell} = {};
 
-  constructor(scope: IScope, states: States, halRequest: HalRequestService) {
-    states.table.rows.observeOnScope(scope)
-      .subscribe(rows => {
-        this.workPackageIdOrder = rows.map(wp => wp.id.toString());
+  private elements:TimelineRelationElement[] = [];
 
-        halRequest.get(
-          '/api/v3/relations',
-          {
-            filters: JSON.stringify([{ involved: {operator: '=', values: this.workPackageIdOrder } }])
-          }).then((collection: CollectionResource) => {
-            this.removeAllElements();
-            collection.elements.forEach((relation: RelationResource) => {
-              const fromId = WorkPackageResource.idFromLink(relation.from.href!);
-              const toId = WorkPackageResource.idFromLink(relation.to.href!);
-              this.displayRelation(fromId, toId);
-            });
-            this.renderElements();
-          });
-      });
+  constructor(private scope:IScope) {
+    injectorBridge(this);
+    this.requireVisibleRelations();
+    this.setupRelationSubscription();
   }
 
   updateViewParameter(viewParams: TimelineViewParameters) {
@@ -125,23 +104,66 @@ export class WpTimelineGlobalService {
     this.update();
   }
 
-  displayRelation(from: string, to: string): number {
-    const elem = new TimelineGlobalElement();
-    elem.from = from;
-    elem.to = to;
-    this.elements.push(elem);
-    this.update();
-    return elem.id;
+  /**
+   * Ensure visible relations (through table.rows) are loaded automatically.
+   */
+  private requireVisibleRelations() {
+
+    // Observe the rows and request relations if changed
+    // AND timeline is visible.
+    this.states.table.timelineVisible
+      .observeOnScope(this.scope)
+      .withLatestFrom(
+        this.states.table.rows.observeOnScope(this.scope) // TODO: Use observeUntil(scopeDestroyed$)
+      )
+      .filter(([visible, rows]) => visible)
+      .map(([visible, rows]) => rows)
+      .subscribe((rows:WorkPackageResource[]) => {
+        this.workPackageIdOrder = rows.map(wp => wp.id.toString());
+        this.wpRelations.requireInvolved(this.workPackageIdOrder);
+      });
   }
 
-  removeElement(id: number) {
-    jQuery("." + TimelineGlobalElement.timelineGlobalElementIdCssClass + id).remove();
-    _.remove(this.elements, elem => elem.id == id);
+  /**
+   * Refresh relations of visible rows.
+   */
+  private setupRelationSubscription() {
+    this.wpStates.relations
+      .observe(this.scope) // TODO: Use observeUntil(scopeDestroyed$)
+      .withLatestFrom(
+        this.states.table.timelineVisible.observeOnScope(this.scope)
+      )
+      .filter(([nextVal, visible]) => nextVal && visible)
+      .map(([nextVal, visible]) => nextVal)
+      .subscribe((nextVal:[string, RelationsStateValue]) => {
+        const [workPackageId, relations] = nextVal;
+
+        if (workPackageId && this.cells[workPackageId]) {
+          this.refreshRelations(workPackageId, relations);
+        }
+      });
+  }
+
+  private refreshRelations(workPackageId:string, relations:RelationsStateValue) {
+    // Remove all previous relations for the work package
+    const prefix = TimelineRelationElement.workPackagePrefix(workPackageId);
+    jQuery(`.${prefix}`).remove();
+
+    _.each(relations, (relation:RelationResource) => {
+      const elem = new TimelineRelationElement(workPackageId, relation);
+      this.elements.push(elem);
+    });
+
+    this.update();
   }
 
   private update() {
     this.removeAllVisibleElements();
     this.renderElements();
+  }
+
+  private removeElementsFor(workPackageId:string) {
+    _.remove(this.elements, (element) => element.belongsToId === workPackageId);
   }
 
   private removeAllElements() {
@@ -161,14 +183,13 @@ export class WpTimelineGlobalService {
 
     const vp = this.viewParameters;
 
-    for (let e of this.elements) {
-      jQuery('.' + e.classId).remove();
+    for (const e of this.elements) {
+      const involved = e.relation.ids;
+      const idxFrom = this.workPackageIdOrder.indexOf(involved.from);
+      const idxTo = this.workPackageIdOrder.indexOf(involved.to);
 
-      const idxFrom = this.workPackageIdOrder.indexOf(e.from);
-      const idxTo = this.workPackageIdOrder.indexOf(e.to);
-
-      const startCell = this.cells[e.from];
-      const endCell = this.cells[e.to];
+      const startCell = this.cells[involved.from];
+      const endCell = this.cells[involved.to];
 
       if (idxFrom === -1 || idxTo === -1 || _.isNil(startCell) || _.isNil(endCell)) {
         continue;
@@ -189,13 +210,13 @@ export class WpTimelineGlobalService {
       }
 
       const startLength = 13;
-      startCell.timelineCell.appendChild(newSegment(vp, e.classId, 'green', 19, lastX, startLength, 1));
+      startCell.timelineCell.appendChild(newSegment(vp, e.className, 'green', 19, lastX, startLength, 1));
       lastX += startLength;
 
       if (directionY === 1) {
-        startCell.timelineCell.appendChild(newSegment(vp, e.classId, 'red', 19, lastX, 1, 22));
+        startCell.timelineCell.appendChild(newSegment(vp, e.className, 'red', 19, lastX, 1, 22));
       } else {
-        startCell.timelineCell.appendChild(newSegment(vp, e.classId, 'red', -1, lastX, 1, 22));
+        startCell.timelineCell.appendChild(newSegment(vp, e.className, 'red', -1, lastX, 1, 22));
       }
 
       // vert segment
@@ -205,34 +226,33 @@ export class WpTimelineGlobalService {
         if (_.isNil(cell)) {
           continue;
         }
-        cell.timelineCell.appendChild(newSegment(vp, e.classId, 'blue', 0, lastX, 1, 42));
+        cell.timelineCell.appendChild(newSegment(vp, e.className, 'blue', 0, lastX, 1, 42));
       }
 
       // end
       if (directionX === 1) {
         if (directionY === 1) {
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'green', 0, lastX, 1, 19));
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'blue', 19, lastX, targetX - lastX, 1));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'green', 0, lastX, 1, 19));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'blue', 19, lastX, targetX - lastX, 1));
         } else {
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'green', 19, lastX, 1, 22));
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'blue', 19, lastX, targetX - lastX, 1));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'green', 19, lastX, 1, 22));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'blue', 19, lastX, targetX - lastX, 1));
         }
       } else {
         if (directionY === 1) {
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'green', 0, lastX, 1, 8));
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'blue', 8, targetX - 10, lastX - targetX + 11, 1));
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'green', 8, targetX - 10, 1, 11));
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'red', 19, targetX - 10, 10, 1));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'green', 0, lastX, 1, 8));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'blue', 8, targetX - 10, lastX - targetX + 11, 1));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'green', 8, targetX - 10, 1, 11));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'red', 19, targetX - 10, 10, 1));
         } else {
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'green', 32, lastX, 1, 8));
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'blue', 32, targetX - 10, lastX - targetX + 11, 1));
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'green', 19, targetX - 10, 1, 13));
-          endCell.timelineCell.appendChild(newSegment(vp, e.classId, 'red', 19, targetX - 10, 10, 1));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'green', 32, lastX, 1, 8));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'blue', 32, targetX - 10, lastX - targetX + 11, 1));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'green', 19, targetX - 10, 1, 13));
+          endCell.timelineCell.appendChild(newSegment(vp, e.className, 'red', 19, targetX - 10, 10, 1));
         }
       }
     }
-
   }
-
 }
 
+WpTimelineGlobalService.$inject = ['states', 'wpStates', 'wpRelations'];

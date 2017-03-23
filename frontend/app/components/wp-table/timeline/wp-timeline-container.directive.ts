@@ -28,7 +28,6 @@
 import {openprojectModule} from "../../../angular-modules";
 import {TimelineViewParameters, RenderInfo, timelineElementCssClass} from "./wp-timeline";
 import {WorkPackageResourceInterface} from "./../../api/api-v3/hal-resources/work-package-resource.service";
-import {HalRequestService} from '../../api/api-v3/hal-request/hal-request.service';
 import {WpTimelineHeader} from "./wp-timeline.header";
 import {States} from "./../../states.service";
 import {BehaviorSubject, Observable} from "rxjs";
@@ -47,7 +46,7 @@ export class WorkPackageTimelineTableController {
 
   public wpTimelineHeader: WpTimelineHeader;
 
-  public readonly globalService = new WpTimelineGlobalService(this.$scope, this.states, this.halRequest);
+  public readonly globalService = new WpTimelineGlobalService(this.$scope);
 
   private updateAllWorkPackagesSubject = new BehaviorSubject<boolean>(true);
 
@@ -60,8 +59,7 @@ export class WorkPackageTimelineTableController {
   constructor(private $scope: IScope,
               private $element: ng.IAugmentedJQuery,
               private TypeResource:any,
-              private states: States,
-              private halRequest: HalRequestService) {
+              private states: States) {
 
     "ngInject";
 
